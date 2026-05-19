@@ -2,6 +2,8 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from enum import Enum
 from typing import List, Optional
+import re
+import unicodedata
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -130,6 +132,99 @@ class SettingUpdate(BaseModel):
     hour_cost: float
 
 
+def normalize_header(value: str) -> str:
+    text = unicodedata.normalize("NFKD", str(value or "")).encode("ascii", "ignore").decode("ascii")
+    text = text.strip().lower()
+    text = re.sub(r"[^a-z0-9]+", "_", text)
+    return text.strip("_")
+
+
+def parse_decimal(value) -> Optional[Decimal]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float, Decimal)):
+        return Decimal(str(value))
+    txt = str(value).strip()
+    if not txt:
+        return None
+    txt = txt.replace("R$", "").replace("US$", "").replace("$", "").replace(" ", "")
+    if "," in txt and "." in txt:
+        txt = txt.replace(".", "").replace(",", ".")
+    else:
+        txt = txt.replace(",", ".")
+    try:
+        return Decimal(txt)
+    except Exception:
+        return None
+
+
+def find_header_and_columns(ws, requested_sku: str, requested_desc: str, requested_cost: str, requested_type: str):
+    aliases = {
+        "sku": {
+            normalize_header(requested_sku),
+            "part",
+            "part_number",
+            "partnumber",
+            "pn",
+            "sku",
+            "item_code",
+            "codigo",
+            "codigo_item",
+            "product_code",
+        },
+        "desc": {
+            normalize_header(requested_desc),
+            "desc",
+            "description",
+            "item_description",
+            "product_description",
+            "nome",
+            "name",
+            "produto",
+        },
+        "cost": {
+            normalize_header(requested_cost),
+            "price",
+            "unit_price",
+            "unit_cost",
+            "cost",
+            "valor",
+            "preco",
+            "preco_unitario",
+            "list_price",
+            "msrp",
+        },
+        "type": {
+            normalize_header(requested_type),
+            "type",
+            "categoria",
+            "category",
+            "class",
+            "item_type",
+        },
+    }
+
+    best = None
+    for row_num in range(1, min(40, ws.max_row) + 1):
+        row_values = [normalize_header(cell) for cell in ws.iter_rows(min_row=row_num, max_row=row_num, values_only=True).__next__()]
+        row_map = {h: idx for idx, h in enumerate(row_values) if h}
+        score = 0
+        indices = {}
+        for key in ("sku", "desc", "cost"):
+            found = next((row_map[a] for a in aliases[key] if a in row_map), None)
+            if found is not None:
+                score += 1
+                indices[key] = found
+        type_idx = next((row_map[a] for a in aliases["type"] if a in row_map), None)
+        if type_idx is not None:
+            indices["type"] = type_idx
+        if score >= 3:
+            return row_num, indices
+        if best is None or score > best[0]:
+            best = (score, row_num, indices)
+    return (best[1], best[2]) if best and best[0] >= 2 else (None, None)
+
+
 def db_session():
     db = SessionLocal()
     try:
@@ -236,13 +331,28 @@ def import_price_list(
     admin: User = Depends(require_admin),
 ):
     wb = load_workbook(file.file, data_only=True)
-    ws = wb.active
-    headers = [str(c.value).strip() if c.value is not None else "" for c in ws[1]]
-    idx = {h.lower(): i for i, h in enumerate(headers)}
 
-    for required in [sku_column.lower(), desc_column.lower(), cost_column.lower()]:
-        if required not in idx:
-            raise HTTPException(status_code=400, detail=f"Coluna obrigatória não encontrada: {required}")
+    selected = None
+    selected_header_row = None
+    selected_idx = None
+    best_score = -1
+
+    for ws in wb.worksheets:
+        header_row, idx = find_header_and_columns(ws, sku_column, desc_column, cost_column, type_column)
+        score = 0 if idx is None else len([k for k in ("sku", "desc", "cost") if k in idx])
+        if score > best_score:
+            best_score = score
+            selected = ws
+            selected_header_row = header_row
+            selected_idx = idx
+        if score == 3:
+            break
+
+    if not selected or not selected_idx or any(k not in selected_idx for k in ("sku", "desc", "cost")):
+        raise HTTPException(
+            status_code=400,
+            detail="Nao foi possivel identificar colunas obrigatorias no XLSX (SKU, descricao e custo).",
+        )
 
     db.query(PriceListVersion).filter(PriceListVersion.line == line, PriceListVersion.is_active.is_(True)).update({"is_active": False})
 
@@ -251,23 +361,30 @@ def import_price_list(
     db.flush()
 
     imported = 0
-    for row in ws.iter_rows(min_row=2, values_only=True):
-        sku_val = row[idx[sku_column.lower()]] if idx[sku_column.lower()] < len(row) else None
-        desc_val = row[idx[desc_column.lower()]] if idx[desc_column.lower()] < len(row) else ""
-        cost_val = row[idx[cost_column.lower()]] if idx[cost_column.lower()] < len(row) else None
-        type_val = row[idx[type_column.lower()]] if type_column.lower() in idx and idx[type_column.lower()] < len(row) else "default"
+    seen = set()
+    skipped = 0
+    for row in selected.iter_rows(min_row=(selected_header_row or 1) + 1, values_only=True):
+        sku_val = row[selected_idx["sku"]] if selected_idx["sku"] < len(row) else None
+        desc_val = row[selected_idx["desc"]] if selected_idx["desc"] < len(row) else ""
+        cost_val = row[selected_idx["cost"]] if selected_idx["cost"] < len(row) else None
+        type_val = row[selected_idx["type"]] if "type" in selected_idx and selected_idx["type"] < len(row) else "default"
 
-        if sku_val in (None, "") or cost_val in (None, ""):
+        sku = str(sku_val or "").strip()
+        if not sku:
+            skipped += 1
             continue
-        try:
-            cost = Decimal(str(cost_val).replace(",", "."))
-        except Exception:
+        cost = parse_decimal(cost_val)
+        if cost is None:
+            skipped += 1
             continue
+        if sku in seen:
+            continue
+        seen.add(sku)
 
         db.add(
             PriceItem(
                 version_id=version.id,
-                sku=str(sku_val).strip(),
+                sku=sku,
                 description=str(desc_val or "").strip(),
                 unit_cost=cost,
                 currency=currency.upper(),
@@ -277,7 +394,14 @@ def import_price_list(
         imported += 1
 
     db.commit()
-    return {"ok": True, "version_id": version.id, "imported": imported}
+    return {
+        "ok": True,
+        "version_id": version.id,
+        "imported": imported,
+        "skipped": skipped,
+        "sheet_used": selected.title,
+        "header_row": selected_header_row,
+    }
 
 
 @app.post("/pricing/calculate")
