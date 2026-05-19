@@ -171,6 +171,7 @@ def find_header_and_columns(ws, requested_sku: str, requested_desc: str, request
             "codigo",
             "codigo_item",
             "product_code",
+            "cod",        # Fortinet
         },
         "desc": {
             normalize_header(requested_desc),
@@ -181,6 +182,7 @@ def find_header_and_columns(ws, requested_sku: str, requested_desc: str, request
             "nome",
             "name",
             "produto",
+            "descricao",   # Fortinet
         },
         "cost": {
             normalize_header(requested_cost),
