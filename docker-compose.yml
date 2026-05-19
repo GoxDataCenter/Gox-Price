@@ -1,22 +1,26 @@
 services:
   backend:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
+    image: ghcr.io/goxdatacenter/gox-price-backend:latest
     container_name: gox-pricing-backend
     volumes:
       - pricing_data:/data
     restart: unless-stopped
 
   frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
+    image: ghcr.io/goxdatacenter/gox-price-frontend:latest
     container_name: gox-pricing-frontend
     depends_on:
       - backend
     ports:
-      - "8088:80"
+      - "18088:80"
+    restart: unless-stopped
+
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: gox-watchtower
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: --interval 60 gox-pricing-backend gox-pricing-frontend
     restart: unless-stopped
 
 volumes:
