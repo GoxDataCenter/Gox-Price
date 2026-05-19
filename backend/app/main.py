@@ -205,9 +205,12 @@ def find_header_and_columns(ws, requested_sku: str, requested_desc: str, request
     }
 
     best = None
+    exact_header_idx = None
     for row_num in range(1, min(120, ws.max_row) + 1):
         row_values = [normalize_header(cell) for cell in ws.iter_rows(min_row=row_num, max_row=row_num, values_only=True).__next__()]
         row_map = {h: idx for idx, h in enumerate(row_values) if h}
+        if "sku" in row_map:
+            exact_header_idx = (row_num, row_map["sku"])
         score = 0
         indices = {}
         for key in ("sku", "desc", "cost"):
@@ -269,14 +272,21 @@ def find_header_and_columns(ws, requested_sku: str, requested_desc: str, request
         return (best[1], best[2]) if best and best[0] >= 2 else (None, None)
 
     cost_candidate = max(col_stats, key=lambda c: c["numeric"])
-    sku_candidate = max(col_stats, key=lambda c: c["sku_like"])
-    desc_candidate = max(
-        col_stats,
-        key=lambda c: (c["text"], c["avg_len"]),
-    )
+
+    if exact_header_idx is not None:
+        sku_candidate = {"idx": exact_header_idx[1], "sku_like": 999}
+    else:
+        # SKU tends to be alphanumeric but shorter and with fewer spaces than description.
+        sku_candidate = max(col_stats, key=lambda c: (c["sku_like"], -c["avg_len"], c["text"]))
+
+    desc_pool = [c for c in col_stats if c["idx"] not in {sku_candidate["idx"], cost_candidate["idx"]}]
+    if not desc_pool:
+        desc_pool = col_stats
+    # Description tends to be text-heavy and longer.
+    desc_candidate = max(desc_pool, key=lambda c: (c["text"], c["avg_len"]))
 
     inferred = {}
-    if sku_candidate["sku_like"] > 0:
+    if sku_candidate["idx"] is not None:
         inferred["sku"] = sku_candidate["idx"]
     if desc_candidate["text"] > 0:
         inferred["desc"] = desc_candidate["idx"]
