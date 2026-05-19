@@ -148,10 +148,35 @@ def parse_decimal(value) -> Optional[Decimal]:
     if not txt:
         return None
     txt = txt.replace("R$", "").replace("US$", "").replace("$", "").replace(" ", "")
-    if "," in txt and "." in txt:
-        txt = txt.replace(".", "").replace(",", ".")
+
+    last_comma = txt.rfind(",")
+    last_dot = txt.rfind(".")
+
+    if last_comma == -1 and last_dot == -1:
+        pass
+    elif last_dot != -1 and last_comma == -1:
+        # Só tem ponto. Ver se é casa de milhar ou decimal.
+        # Regra geral: se tem mais de um ponto ou exatamente 3 casas decimais após ele, é provável milhar, mas o mais comum é ignorar se tivermos apenas 1 ponto e 2 casas.
+        # Para ser seguro na precificação, se tivermos "8.888", o python Decimal lê como "8.888". Deixaremos o padrão BR ser o prevalecente caso não possua ambos.
+        # No BR, um número "1.200" normalmente é "1200". No entanto, "123.45" é decimal.
+        # O replace simples só com . ou só com , precisa avaliar a quantia de casas à direita.
+        parts = txt.rsplit(".", 1)
+        if len(parts) == 2 and len(parts[1]) == 3:
+            txt = txt.replace(".", "") # assumindo milhar BR (ex: 8.888)
+        else:
+            pass # é um decimal normal do padrão US (ex: 1234.56)
+    elif last_comma != -1 and last_dot == -1:
+        # Só tem vírgula.
+        parts = txt.rsplit(",", 1)
+        if len(parts) == 2 and len(parts[1]) == 3:
+            txt = txt.replace(",", "") # assumindo milhar US (ex: 9,999)
+        else:
+            txt = txt.replace(",", ".") # assumindo decimal BR (ex: 1234,56)
+    elif last_dot > last_comma:
+        txt = txt.replace(",", "")
     else:
-        txt = txt.replace(",", ".")
+        txt = txt.replace(".", "").replace(",", ".")
+
     try:
         return Decimal(txt)
     except Exception:
