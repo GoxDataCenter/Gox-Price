@@ -1,0 +1,18 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Local env
+.venv/
+.env
+
+# Frontend deps
+node_modules/
+dist/
+
+# Database file
+pricing.db
+
+# OS
+.DS_Store
+Thumbs.db

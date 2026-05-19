@@ -1,0 +1,23 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: gox-pricing-backend
+    volumes:
+      - pricing_data:/data
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: gox-pricing-frontend
+    depends_on:
+      - backend
+    ports:
+      - "8088:80"
+    restart: unless-stopped
+
+volumes:
+  pricing_data:
