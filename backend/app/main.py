@@ -205,7 +205,7 @@ def find_header_and_columns(ws, requested_sku: str, requested_desc: str, request
     }
 
     best = None
-    for row_num in range(1, min(40, ws.max_row) + 1):
+    for row_num in range(1, min(120, ws.max_row) + 1):
         row_values = [normalize_header(cell) for cell in ws.iter_rows(min_row=row_num, max_row=row_num, values_only=True).__next__()]
         row_map = {h: idx for idx, h in enumerate(row_values) if h}
         score = 0
@@ -222,6 +222,70 @@ def find_header_and_columns(ws, requested_sku: str, requested_desc: str, request
             return row_num, indices
         if best is None or score > best[0]:
             best = (score, row_num, indices)
+
+    # Heuristic fallback: infer columns by data patterns when headers are unusual.
+    if ws.max_row < 3:
+        return (best[1], best[2]) if best and best[0] >= 2 else (None, None)
+
+    probe_start = (best[1] + 1) if best else 2
+    probe_end = min(probe_start + 120, ws.max_row)
+    max_col = ws.max_column
+    col_stats = []
+
+    for col_idx in range(max_col):
+        values = []
+        numeric_count = 0
+        text_count = 0
+        sku_like_count = 0
+
+        for row_num in range(probe_start, probe_end + 1):
+            row = ws.iter_rows(min_row=row_num, max_row=row_num, values_only=True).__next__()
+            val = row[col_idx] if col_idx < len(row) else None
+            if val is None:
+                continue
+            s = str(val).strip()
+            if not s:
+                continue
+            values.append(s)
+            if parse_decimal(val) is not None:
+                numeric_count += 1
+            else:
+                text_count += 1
+            if re.search(r"[A-Za-z]", s) and re.search(r"[0-9]", s):
+                sku_like_count += 1
+
+        col_stats.append(
+            {
+                "idx": col_idx,
+                "numeric": numeric_count,
+                "text": text_count,
+                "sku_like": sku_like_count,
+                "samples": values[:5],
+                "avg_len": (sum(len(v) for v in values) / len(values)) if values else 0,
+            }
+        )
+
+    if not col_stats:
+        return (best[1], best[2]) if best and best[0] >= 2 else (None, None)
+
+    cost_candidate = max(col_stats, key=lambda c: c["numeric"])
+    sku_candidate = max(col_stats, key=lambda c: c["sku_like"])
+    desc_candidate = max(
+        col_stats,
+        key=lambda c: (c["text"], c["avg_len"]),
+    )
+
+    inferred = {}
+    if sku_candidate["sku_like"] > 0:
+        inferred["sku"] = sku_candidate["idx"]
+    if desc_candidate["text"] > 0:
+        inferred["desc"] = desc_candidate["idx"]
+    if cost_candidate["numeric"] > 0:
+        inferred["cost"] = cost_candidate["idx"]
+
+    if len({"sku", "desc", "cost"} & set(inferred.keys())) == 3:
+        return (best[1] if best else 1, inferred)
+
     return (best[1], best[2]) if best and best[0] >= 2 else (None, None)
 
 
